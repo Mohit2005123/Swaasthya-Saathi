@@ -1,2 +1,0 @@
-file '/Users/mohitmongia/Documents/Full stack web developments/swasthya-saathi/backend/public/chunk_1757363501784_0.mp3'
-file '/Users/mohitmongia/Documents/Full stack web developments/swasthya-saathi/backend/public/chunk_1757363501784_1.mp3'
