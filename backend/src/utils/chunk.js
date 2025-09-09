@@ -2,20 +2,34 @@ function splitIntoChunks(text, maxLen = 400) {
   const chunks = [];
   let current = "";
 
-  const parts = text.split(/[\n\r]|(?<=[.?!])\s+/);
+  // Split by sentences, but be more careful about preserving all content
+  const parts = text.split(/[\n\r]|(?<=[.?!])\s+/).filter(part => part.trim());
 
   for (const sentence of parts) {
-    if ((current + sentence).length > maxLen) {
+    const trimmedSentence = sentence.trim();
+    if (!trimmedSentence) continue; // Skip empty parts
+    
+    const testCurrent = current ? current + " " + trimmedSentence : trimmedSentence;
+    
+    if (testCurrent.length > maxLen && current.trim()) {
+      // Push current chunk and start new one
       chunks.push(current.trim());
-      current = sentence;
+      current = trimmedSentence;
     } else {
-      current += " " + sentence;
+      // Add to current chunk
+      current = testCurrent;
     }
   }
-  if (current.trim()) chunks.push(current.trim());
+  
+  // Always push the final chunk if it has content
+  if (current && current.trim()) {
+    chunks.push(current.trim());
+  }
+  
   return chunks;
 }
 
 module.exports = { splitIntoChunks };
+
 
 

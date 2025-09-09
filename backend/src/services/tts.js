@@ -13,6 +13,7 @@ async function generateSpeechFromText(fullText, langCode, timestamp) {
   const localized = convertAsciiDigitsToNative(fullText, langCode);
   const chunks = splitIntoChunks(localized, 400).filter(chunk => chunk && chunk.trim());
   
+  
   if (chunks.length === 0) {
     console.warn('No valid text chunks found for TTS generation');
     return null;
@@ -24,37 +25,52 @@ async function generateSpeechFromText(fullText, langCode, timestamp) {
     const chunk = chunks[i].trim();
     if (!chunk) continue; // Skip empty chunks
     
-    const audioRes = await sarvamClient.textToSpeech.convert({
-      text: chunk,
-      target_language_code: langCode,
-      speaker: 'anushka',
-      model: 'bulbul:v2',
-      pitch: 0, pace: 1, loudness: 1, speech_sample_rate: 22050,
-      enable_preprocessing: true
-    });
+    try {
+      const audioRes = await sarvamClient.textToSpeech.convert({
+        text: chunk,
+        target_language_code: langCode,
+        speaker: 'anushka',
+        model: 'bulbul:v2',
+        pitch: 0, pace: 1, loudness: 1, speech_sample_rate: 22050,
+        enable_preprocessing: true
+      });
 
-    const buffer = Buffer.from(audioRes.audios[0], 'base64');
-    const rawPath = path.join(__dirname, '../../public', `chunk_${timestamp}_${i}.raw`);
-    const mp3Path = path.join(__dirname, '../../public', `chunk_${timestamp}_${i}.mp3`);
-    mp3Files.push(mp3Path);
+      // Process all audio chunks returned by Sarvam
+      if (audioRes.audios && audioRes.audios.length > 0) {
+        for (let j = 0; j < audioRes.audios.length; j++) {
+          const buffer = Buffer.from(audioRes.audios[j], 'base64');
+          const rawPath = path.join(__dirname, '../../public', `chunk_${timestamp}_${i}_${j}.raw`);
+          const mp3Path = path.join(__dirname, '../../public', `chunk_${timestamp}_${i}_${j}.mp3`);
+          mp3Files.push(mp3Path);
 
-    fs.writeFileSync(rawPath, buffer);
+          fs.writeFileSync(rawPath, buffer);
 
-    await new Promise((resolve, reject) => {
-      const ffmpeg = spawn('ffmpeg', [
-        '-f', 's16le', '-ar', '22050', '-ac', '1',
-        '-i', rawPath,
-        '-acodec', 'libmp3lame', '-ab', '128k',
-        mp3Path
-      ]);
-      ffmpeg.on('close', code => code === 0 ? resolve() : reject(new Error('ffmpeg failed')));
-    });
+          await new Promise((resolve, reject) => {
+            const ffmpeg = spawn('ffmpeg', [
+              '-f', 's16le', '-ar', '22050', '-ac', '1',
+              '-i', rawPath,
+              '-acodec', 'libmp3lame', '-ab', '128k',
+              mp3Path
+            ]);
+            ffmpeg.on('close', code => code === 0 ? resolve() : reject(new Error('ffmpeg failed')));
+          });
+          
+        }
+      } else {
+        console.warn(`No audio data received for chunk ${i + 1}`);
+      }
+    } catch (error) {
+      console.error(`Error processing chunk ${i + 1}:`, error.message);
+      throw error;
+    }
   }
 
   const concatList = path.join(__dirname, '../../public', `concat_${timestamp}.txt`);
-  fs.writeFileSync(concatList, mp3Files.map(f => `file '${f}'`).join('\n'));
-
+  const concatContent = mp3Files.map(f => `file '${f}'`).join('\n');
+  fs.writeFileSync(concatList, concatContent);
+  
   const finalPath = path.join(__dirname, '../../public', `answer_${timestamp}.mp3`);
+  
   await new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', [
       '-f', 'concat', '-safe', '0',
@@ -62,7 +78,14 @@ async function generateSpeechFromText(fullText, langCode, timestamp) {
       '-c', 'copy',
       finalPath
     ]);
-    ffmpeg.on('close', code => code === 0 ? resolve() : reject(new Error('concat ffmpeg failed')));
+    
+    ffmpeg.on('close', code => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error('concat ffmpeg failed'));
+      }
+    });
   });
 
   return `${NGROK_DOMAIN}/static/answer_${timestamp}.mp3`;

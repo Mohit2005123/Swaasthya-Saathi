@@ -81,7 +81,9 @@ module.exports = function webhookRouterFactory({ twilioClient }) {
         const prevSummary = userState[from]?.summary || '';
         const langCode = userState[from]?.languageCode || 'en-IN';
         const langLabel = userState[from]?.languageLabel || 'English';
-        const replyText = await answerQuestionWithContext(prevSummary, transcript);
+        // Derive a 2-letter language code for text generation if possible
+        const targetLang = (langCode.split('-')[0] || 'en');
+        const replyText = await answerQuestionWithContext(prevSummary, transcript, targetLang);
 
         const audioAnswerURL = await generateSpeechFromText(replyText, langCode, timestamp);
 
