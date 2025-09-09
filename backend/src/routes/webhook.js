@@ -119,6 +119,16 @@ module.exports = function webhookRouterFactory({ twilioClient }) {
         return res.sendStatus(200);
       }
 
+      // Link command handler
+      if (incomingMsg === 'link' || incomingMsg === '🔗') {
+        await twilioClient.messages.create({
+          from: 'whatsapp:+14155238886',
+          to: from,
+          body: '🔗 Here\'s the link to Swaasthya-Saathi:\n\nhttps://swaasthya-saathi.vercel.app/\n\nAccess your health dashboard and manage your prescriptions!'
+        });
+        return res.sendStatus(200);
+      }
+
       // Language selection handler
       if (userState[from]?.waitingForLanguage && incomingMsg) {
         const selectedLang = langMap[incomingMsg];
@@ -205,7 +215,8 @@ Please send the number of your preferred language.
           body:
             '🗣️ In which language would you like to hear the summary?\n' +
             '1. हिंदी\n2. English\n3. বাংলা\n4. தமிழ்\n5. తెలుగు\n6. ಕನ್ನಡ\n7.മലയാളം \n8. मराठी\n9. ગુજરાતી\n' +
-            '\n👉 Reply with the number (1–9).'
+            '\n👉 Reply with the number (1–9).\n\n' +
+            '💡 Tip: Type "LINK" or "🔗" anytime to access your health dashboard!'
         });
 
         await twilioClient.messages.create({
