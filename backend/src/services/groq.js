@@ -80,6 +80,147 @@ async function getImagePrescriptionSummary(imageUrl) {
   return finalSummary;
 }
 
+async function analyzeMedicineImage(prescriptionSummary, imageUrl, targetLanguage = 'en') {
+  const MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+  const prompt = `You are a pharmacist assistant.
+Task:
+- Look at the provided photo. First decide: is this clearly a photo of a medicine/package/blister/label? Answer strictly yes/no as is_medicine.
+- If is_medicine is yes, read any visible brand/generic name and strength.
+- Compare with the prescription summary provided. Determine if this medicine appears to match one item from the prescription (by name or reasonable generic equivalence). Answer strictly yes/no as matches_prescription.
+- If matches, produce simple spoken instructions on how and when to take it, based ONLY on the prescription summary; avoid extra disclaimers. Plain sentences, no markdown.
+- If it's a medicine but does not match the prescription, provide ONLY practical dosage and timing instructions (e.g., "Take one tablet twice daily with food", "Take as needed for pain, maximum 3 times per day", "Take with a full glass of water"). Focus on HOW and WHEN to take, not safety warnings.
+- If not a medicine, extract all visible text from the image and provide it as instructions.
+Return a strict JSON object with keys: is_medicine (boolean), matches_prescription (boolean), medicine_name (string), instructions (string), warning (string).`;
+
+  const chat = await groq.chat.completions.create({
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'text', text: `Prescription summary:\n${sanitizePlainText(prescriptionSummary || '')}` },
+          { type: 'image_url', image_url: { url: imageUrl } }
+        ]
+      }
+    ],
+    model: MODEL,
+    temperature: 0.2,
+    top_p: 1,
+    max_completion_tokens: 800,
+    stream: false
+  });
+
+  let raw = chat.choices[0].message.content || '';
+  raw = sanitizePlainText(raw);
+  // Try to extract JSON substring if the model added text
+  const jsonMatch = raw.match(/\{[\s\S]*\}$/);
+  const jsonText = jsonMatch ? jsonMatch[0] : raw;
+  let parsed = {
+    is_medicine: false,
+    matches_prescription: false,
+    medicine_name: '',
+    instructions: '',
+    warning: 'Unable to read the image. Please send a clear photo of the medicine front label.'
+  };
+  try {
+    const obj = JSON.parse(jsonText);
+    parsed.is_medicine = Boolean(obj.is_medicine);
+    parsed.matches_prescription = Boolean(obj.matches_prescription);
+    parsed.medicine_name = String(obj.medicine_name || '');
+    parsed.instructions = sanitizePlainText(String(obj.instructions || ''));
+    parsed.warning = sanitizePlainText(String(obj.warning || parsed.warning));
+  } catch (_) {}
+
+  // Fallback: if the first pass could not confidently read the image, try an OCR-style extraction and re-evaluate using text only
+  if (!parsed.is_medicine || (!parsed.matches_prescription && !parsed.instructions)) {
+    try {
+      const ocrPrompt = 'Extract all legible text from this image as a single plain line without newlines. No extra words.';
+      const ocr = await groq.chat.completions.create({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: ocrPrompt },
+              { type: 'image_url', image_url: { url: imageUrl } }
+            ]
+          }
+        ],
+        model: MODEL,
+        temperature: 0.1,
+        top_p: 1,
+        max_completion_tokens: 512,
+        stream: false
+      });
+
+      const extracted = sanitizePlainText(ocr.choices[0].message.content || '');
+      console.log('Extracted text from medicine image: ', extracted);
+      console.log('Prescription summary: ', sanitizePlainText(prescriptionSummary || ''));
+      if (extracted && extracted.length >= 3) {
+        const textOnlyPrompt = `You are a pharmacist assistant.
+Inputs:
+- Prescription summary: ${sanitizePlainText(prescriptionSummary || '')}
+- Text seen on package: ${extracted}
+
+Decide: is the package text likely a medicine label? If yes, infer the probable medicine/brand name.
+Compare name/strength with prescription summary and judge match.
+If matched, produce plain spoken instructions from the prescription summary for that item.
+If it's a medicine but doesn't match the prescription, provide ONLY practical dosage and timing instructions (e.g., "Take one tablet twice daily with food", "Take as needed for pain, maximum 3 times per day", "Take with a full glass of water"). Focus on HOW and WHEN to take, not safety warnings.
+If not a medicine, use the extracted text as instructions.
+Return strict JSON with keys: is_medicine (boolean), matches_prescription (boolean), medicine_name (string), instructions (string), warning (string). No extra text.`;
+
+        const retry = await groq.chat.completions.create({
+          messages: [
+            { role: 'user', content: textOnlyPrompt }
+          ],
+          model: 'openai/gpt-oss-120b',
+          temperature: 0.2,
+          top_p: 1,
+          max_tokens: 800
+        });
+
+        let second = sanitizePlainText(retry.choices[0].message.content || '');
+        const jm = second.match(/\{[\s\S]*\}$/);
+        const jt = jm ? jm[0] : second;
+        try {
+          const obj2 = JSON.parse(jt);
+          parsed.is_medicine = Boolean(obj2.is_medicine);
+          parsed.matches_prescription = Boolean(obj2.matches_prescription);
+          parsed.medicine_name = String(obj2.medicine_name || parsed.medicine_name);
+          parsed.instructions = sanitizePlainText(String(obj2.instructions || parsed.instructions));
+          parsed.warning = sanitizePlainText(String(obj2.warning || parsed.warning));
+        } catch (_) {}
+      }
+  } catch (e) {
+    // keep parsed as-is
+  }
+}
+
+// Translate and localize the response to target language
+if (parsed.instructions && parsed.instructions.trim()) {
+  try {
+    let translated = await translateText(parsed.instructions, targetLanguage, 'auto');
+    translated = replaceNumbersWithWords(translated, targetLanguage);
+    translated = convertAsciiDigitsToNative(translated, targetLanguage);
+    parsed.instructions = sanitizePlainText(translated);
+  } catch (e) {
+    console.error('Translation error:', e.message);
+  }
+}
+
+if (parsed.warning && parsed.warning.trim()) {
+  try {
+    let translated = await translateText(parsed.warning, targetLanguage, 'auto');
+    translated = replaceNumbersWithWords(translated, targetLanguage);
+    translated = convertAsciiDigitsToNative(translated, targetLanguage);
+    parsed.warning = sanitizePlainText(translated);
+  } catch (e) {
+    console.error('Translation error:', e.message);
+  }
+}
+
+return parsed;
+}
+
 function sanitizePlainText(input) {
   if (!input) return '';
   // Remove common markdown/special formatting characters and table pipes
@@ -184,6 +325,6 @@ Task:
 }
 
 
-module.exports = { getImagePrescriptionSummary, answerQuestionWithContext };
+module.exports = { getImagePrescriptionSummary, answerQuestionWithContext, analyzeMedicineImage };
 
 

@@ -7,7 +7,7 @@ const { spawn } = require('child_process');
 
 const { translateText } = require('../services/translate');
 const { generateSpeechFromText } = require('../services/tts');
-const { getImagePrescriptionSummary, answerQuestionWithContext } = require('../services/groq');
+const { getImagePrescriptionSummary, answerQuestionWithContext, analyzeMedicineImage } = require('../services/groq');
 const { downloadTwilioMedia } = require('../utils/media');
 const { SARVAM_API_KEY } = require('../config/env');
 
@@ -108,6 +108,17 @@ module.exports = function webhookRouterFactory({ twilioClient }) {
         return res.sendStatus(200);
       }
 
+      // Stop command handler - reset to prescription flow
+      if (incomingMsg === 'done') {
+        userState[from] = {};
+        await twilioClient.messages.create({
+          from: 'whatsapp:+14155238886',
+          to: from,
+          body: '🔄 Session reset! Please send a new prescription photo to start again.'
+        });
+        return res.sendStatus(200);
+      }
+
       // Language selection handler
       if (userState[from]?.waitingForLanguage && incomingMsg) {
         const selectedLang = langMap[incomingMsg];
@@ -157,13 +168,13 @@ module.exports = function webhookRouterFactory({ twilioClient }) {
         return res.sendStatus(200);
       }
 
-      // Prescription image handler
-      if (mediaUrl && contentType?.startsWith('image')) {
+      // Prescription image handler (only when no prescription summary captured yet)
+      if (mediaUrl && contentType?.startsWith('image') && !userState[from]?.summary) {
         const localImageFile = `twilio_img_${timestamp}.jpg`;
         const groqImageUrl = await downloadTwilioMedia(mediaUrl, localImageFile);
 
         const summary = await getImagePrescriptionSummary(groqImageUrl);
-        userState[from] = { waitingForLanguage: true, summary, expectingVoice: false };
+        userState[from] = { waitingForLanguage: true, summary, expectingVoice: false, awaitingMedicinePhoto: true };
 
         const languageList = `
 1 Hindi
@@ -196,6 +207,43 @@ Please send the number of your preferred language.
             '1. हिंदी\n2. English\n3. বাংলা\n4. தமிழ்\n5. తెలుగు\n6. ಕನ್ನಡ\n7.മലയാളം \n8. मराठी\n9. ગુજરાતી\n' +
             '\n👉 Reply with the number (1–9).'
         });
+
+        await twilioClient.messages.create({
+          from: 'whatsapp:+14155238886',
+          to: from,
+          body: '📸 After choosing language, please send a clear photo of each medicine label one by one to get spoken instructions.'
+        });
+      }
+
+      // Medicine image handler (after prescription captured)
+      if (mediaUrl && contentType?.startsWith('image') && userState[from]?.awaitingMedicinePhoto && userState[from]?.summary) {
+        const localImageFile = `medicine_${timestamp}.jpg`;
+        const hostedUrl = await downloadTwilioMedia(mediaUrl, localImageFile);
+
+        const targetLang = (userState[from]?.languageCode || 'en-IN').split('-')[0] || 'en';
+        const analysis = await analyzeMedicineImage(userState[from].summary, hostedUrl, targetLang);
+
+        const langCode = userState[from]?.languageCode || 'en-IN';
+        const langLabel = userState[from]?.languageLabel || 'English';
+
+        // Always provide instructions - either medicine instructions or extracted text
+        const instructions = analysis.instructions || analysis.warning || 'No information available from the image.';
+        const audioURL = await generateSpeechFromText(instructions, langCode, timestamp);
+        
+        if (audioURL) {
+          await twilioClient.messages.create({
+            from: 'whatsapp:+14155238886',
+            to: from,
+            body: `📄 Information from your image in ${langLabel}:`,
+            mediaUrl: [audioURL]
+          });
+        } else {
+          await twilioClient.messages.create({
+            from: 'whatsapp:+14155238886',
+            to: from,
+            body: `📄 Information from your image:\n\n${instructions}`
+          });
+        }
       }
 
       res.sendStatus(200);
